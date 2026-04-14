@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Studio Pro | منصة البث السحابية الرائدة</title>
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800;900&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <style>
+        /* Page-specific overrides or unique sections */
+        .hero {
+            flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+            text-align: center; padding: 120px 20px; max-width: 1000px; margin: 0 auto;
+        }
+        .hero-badge {
+            display: inline-block; padding: 8px 24px; border-radius: 50px;
+            background: rgba(61,90,254,0.1); border: 1px solid rgba(61,90,254,0.2);
+            color: #818cf8; font-weight: 700; font-size: 0.9rem; letter-spacing: 1px; margin-bottom: 30px;
+        }
+        .hero h1 {
+            font-size: 4.5rem; font-weight: 900; line-height: 1.1; margin-bottom: 24px;
+            background: linear-gradient(180deg, #FFFFFF 0%, #94a3b8 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+        .hero p {
+            font-size: 1.25rem; color: var(--text-dim); line-height: 1.8; max-width: 700px; margin-bottom: 50px;
+        }
+        .hero-actions { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
+        
+        .features-section { padding: 80px 20px 120px; max-width: 1200px; margin: 0 auto; width: 100%; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 30px; }
+        .card {
+            background: var(--bg-card); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 40px;
+            text-align: right; transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .card:hover { transform: translateY(-8px); border-color: var(--accent-hover); box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+        .card-icon { font-size: 2.5rem; margin-bottom: 20px; display: inline-block; }
+        .card h3 { font-size: 1.4rem; font-weight: 800; margin-bottom: 15px; color: white; }
+        .card p { color: var(--text-dim); line-height: 1.7; font-size: 1.05rem; }
+    </style>
+</head>
+<body>
+    <div class="ambient-bg"></div>
+
+    <nav class="navbar">
+        <a href="index.html" class="brand">
+            <div class="brand-logo">▶</div>
+            <div class="brand-text">LiveStudio<span>Pro</span></div>
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html" class="active">الرئيسية</a></li>
+            <li><a href="records.html">أرشيف VOD</a></li>
+            <li><a href="settings.html">الإعدادات</a></li>
+        </ul>
+        <div class="nav-actions">
+            <a href="studio.html" class="btn-primary">دخول الأستوديو 🚀</a>
+        </div>
+    </nav>
+
+    <main class="hero">
+        <div class="hero-badge">PaaS Cloud Streaming</div>
+        <h1>بثك المباشر،<br>يعمل باستقلالية تامة.</h1>
+        <p>
+            تجاوز قيود متصفحك. استوديو جراند برو يتيح لك إنشاء جداول بث، رفع طبقات، ومعاينة الفيديوهات، ليقوم السيرفر السحابي بأخذ المهمة وبثها طوال 24 ساعة بأعلى جودة.
+        </p>
+        <div class="hero-actions">
+            <a href="studio.html" class="btn-primary">ابدأ البث الآن</a>
+            <a href="settings.html" class="btn-outline">ضبط حسابك</a>
+        </div>
+    </main>
+
+    <section class="features-section">
+        <div class="grid">
+            <div class="card">
+                <span class="card-icon">☁️</span>
+                <h3>مزامنة سحابية (Firestore)</h3>
+                <p>جميع إعداداتك ومقاطعك وجدولك تُحفظ سحابياً فورياً. افتح الاستوديو من أي جهاز لتجد الاستوديو جاهزاً.</p>
+            </div>
+            <div class="card">
+                <span class="card-icon">🎬</span>
+                <h3>نظام الشاشتين (OBS Style)</h3>
+                <p>عاين المشهد واختبر طبقاتك ونصوصك على شاشة التحضير المعزولة (Preview) قبل أن تنطلق إلى البث (Program).</p>
+            </div>
+            <div class="card">
+                <span class="card-icon">🗄️</span>
+                <h3>أرشيفك الآمن للماضي</h3>
+                <p>التقط أرشيفاً كاملاً لبثك أوتوماتيكياً نحو مكتبتك لتصفحه أو إعادة بثه لاحقاً.</p>
+            </div>
+        </div>
+    </section>
+
+    <footer class="footer">
+        © 2026 Live Studio Pro - Nebula Elite V2 Architecture. تصميم وبناء للتميز.
+    </footer>
+</body>
+</html>
