@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Studio Pro | الإعدادات</title>
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@300;400;500;700;800;900&family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <style>
+        .page-container {
+            display: flex; gap: 40px; max-width: 1200px; width: 100%; margin: 60px auto; padding: 0 20px; flex: 1;
+        }
+        @media (max-width: 900px) { .page-container { flex-direction: column; } }
+        .sidebar-settings { width: 280px; flex-shrink: 0; }
+        .settings-menu { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+        .settings-menu li a {
+            display: block; padding: 16px 20px; border-radius: var(--radius-sm);
+            color: var(--text-dim); text-decoration: none; font-weight: 700;
+            transition: all 0.2s; border: 1px solid transparent;
+        }
+        .settings-menu li a:hover, .settings-menu li a.active {
+            background: rgba(61,90,254,0.08); color: var(--accent); border-color: rgba(61,90,254,0.2);
+        }
+        .content-area {
+            flex: 1; background: var(--bg-card); backdrop-filter: blur(20px);
+            border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 50px;
+        }
+        .content-area h2 { font-size: 2rem; margin-bottom: 10px; color: white; }
+        .content-area p.sub { color: var(--text-dim); margin-bottom: 40px; font-size: 1.1rem; }
+
+        .form-group { display: flex; flex-direction: column; gap: 10px; margin-bottom: 25px; }
+        .form-group label { font-size: 0.95rem; font-weight: 700; color: #cbd5e1; }
+        .input-wrap { position: relative; }
+        input {
+            width: 100%; background: rgba(0,0,0,0.4); border: 1px solid var(--border);
+            color: white; padding: 16px 20px; border-radius: var(--radius-sm);
+            font-size: 1rem; transition: all 0.3s; font-family: 'Inter', sans-serif;
+        }
+        input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 4px rgba(61,90,254,0.15); }
+        .toggle-btn {
+            position: absolute; left: 15px; top: 50%; transform: translateY(-50%);
+            background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 1.2rem;
+        }
+        .alert-box {
+            background: rgba(0, 230, 118, 0.1); border: 1px solid rgba(0, 230, 118, 0.3);
+            color: #00e676; padding: 16px; border-radius: var(--radius-sm); margin-bottom: 30px;
+            display: none; font-weight: 700;
+        }
+    </style>
+</head>
+<body>
+    <div class="ambient-bg"></div>
+    <nav class="navbar">
+        <a href="index.html" class="brand">
+            <div class="brand-logo">▶</div>
+            <div class="brand-text">LiveStudio<span>Pro</span></div>
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html">الرئيسية</a></li>
+            <li><a href="records.html">أرشيف VOD</a></li>
+            <li><a href="settings.html" class="active">الإعدادات</a></li>
+        </ul>
+        <div class="nav-actions">
+            <a href="studio.html" class="btn-primary">دخول الأستوديو 🚀</a>
+        </div>
+    </nav>
+
+    <div class="page-container">
+        <aside class="sidebar-settings">
+            <ul class="settings-menu">
+                <li><a href="#" class="active">🛡️ مفاتيح البث (RTMP)</a></li>
+                <li><a href="#">⚙️ إعدادات الحساب</a></li>
+                <li><a href="#">💳 الاشتراك والباقات</a></li>
+            </ul>
+        </aside>
+
+        <main class="content-area">
+            <h2>مفاتيح البث الافتراضية</h2>
+            <p class="sub">احتفظ بمفاتيح البث الخاصة بك هنا بشكل سحابي آمن لكي لا تضطر لكتابتها في كل مرة تدخل فيها للاستوديو.</p>
+            
+            <div id="save-alert" class="alert-box">✅ تم الحفظ بنجاح في السحابة!</div>
+
+            <div class="form-group">
+                <label>رابط منصة البث الافتراضي (مثال: rtmps://.../app)</label>
+                <input type="text" id="def-url" placeholder="أدخل رابط السيرفر (Server URL) هنا">
+            </div>
+
+            <div class="form-group">
+                <label>مفتاح البث الافتراضي (Stream Key)</label>
+                <div class="input-wrap">
+                    <input type="password" id="def-key" placeholder="live_sk_xxxxxxxxxxxxx">
+                    <button class="toggle-btn" onclick="togglePasswordMode()">👁️</button>
+                </div>
+            </div>
+
+            <div style="margin-top: 40px;">
+                <button class="btn-primary" onclick="saveSettings()" style="font-size: 1.1rem; padding: 16px 45px;">حفظ التغييرات</button>
+            </div>
+        </main>
+    </div>
+
+    <footer class="footer">
+        © 2026 Live Studio Pro - الإعدادات المتقدمة
+    </footer>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyCdlninqPcUphfBu4lT7a2FopwOubptfN0",
+            authDomain: "studio-pro-2cc0a.firebaseapp.com",
+            projectId: "studio-pro-2cc0a",
+            storageBucket: "studio-pro-2cc0a.firebasestorage.app",
+            messagingSenderId: "633712652",
+            appId: "1:633712652:web:0a2d606dc4a2d8ab24be29",
+            measurementId: "G-M58HW6XL0E"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        window.togglePasswordMode = () => {
+            const el = document.getElementById('def-key');
+            el.type = el.type === 'password' ? 'text' : 'password';
+        };
+
+        async function load() {
+            try {
+                const docSnap = await getDoc(doc(db, "studio", "settings"));
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    if(data.defaultRtmpUrl) document.getElementById('def-url').value = data.defaultRtmpUrl;
+                    if(data.defaultStreamKey) document.getElementById('def-key').value = data.defaultStreamKey;
+                }
+            } catch(e) {}
+        }
+        load();
+
+        window.saveSettings = async () => {
+            const url = document.getElementById('def-url').value.trim();
+            const key = document.getElementById('def-key').value.trim();
+            try {
+                await setDoc(doc(db, "studio", "settings"), {
+                    defaultRtmpUrl: url,
+                    defaultStreamKey: key
+                }, { merge: true });
+                
+                const alert = document.getElementById('save-alert');
+                alert.style.display = 'block';
+                setTimeout(() => alert.style.display = 'none', 3000);
+            } catch (err) {
+                alert("لم يتم الحفظ! تأكد من القواعد السحابية.");
+            }
+        };
+    </script>
+</body>
+</html>
