@@ -1,516 +1,970 @@
 /**
- * Live Studio Pro - Firebase Edition
- * Server-Side Streaming Engine
- * Streams 24/7 from Firebase/URL sources without requiring the browser
+ * Grand Studio Pro - Firebase Edition
+ * Full Client Logic: Firebase Upload, Playlist Builder, Server Stream Control
  */
 
-const express = require('express');
-const http = require('http');
-const { spawn } = require('child_process');
-const path = require('path');
-const cors = require('cors');
-const os = require('os');
-const fs = require('fs');
-
-let ffmpegPath = 'ffmpeg';
-try {
-    ffmpegPath = require('ffmpeg-static');
-} catch (e) {
-    console.warn("ffmpeg-static not found, falling back to global ffmpeg.");
-}
-
-if (!fs.existsSync(path.join(__dirname, 'public', 'records'))) {
-    fs.mkdirSync(path.join(__dirname, 'public', 'records'), { recursive: true });
-}
-if (!fs.existsSync(path.join(__dirname, 'public', 'fonts'))) {
-    fs.mkdirSync(path.join(__dirname, 'public', 'fonts'), { recursive: true });
-}
-
-/**
- * Get a valid font path for drawtext
- */
-function getFontPath() {
-    // 1. Check for bundled font in public/fonts
-    const bundledPath = path.join(__dirname, 'public', 'fonts', 'Arial.ttf');
-    if (fs.existsSync(bundledPath)) {
-        // FFmpeg on Windows needs escaped colons and backslashes
-        return bundledPath.replace(/\\/g, '/').replace(/:/g, '\\:');
-    }
-    
-    // 2. Fallback to Windows default if exists
-    const winPath = 'C:/Windows/Fonts/Arial.ttf';
-    if (fs.existsSync(winPath)) {
-        return winPath.replace(/:/g, '\\:');
-    }
-    
-    // 3. Fallback for Linux (common paths)
-    const linuxPath = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
-    if (fs.existsSync(linuxPath)) return linuxPath;
-
-    return 'Arial'; // Last resort: let FFmpeg try to find it in system path
-}
-
-const app = express();
-const server = http.createServer(app);
-
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 // ============================================================
-// STREAM STATE - Persists independently of browser connections
+// FIREBASE CONFIG
 // ============================================================
-// Let's use two processes for professional mixing
-let ingestProcess = null; // Playlist manager
-let mixerProcess = null;  // Graphics/Broadcast mixer
-
-const streamState = {
-    isLive: false,
-    currentIndex: 0,
-    playlist: [],
-    destinations: [],
-    overlayText: '',
-    recordStream: false,
-    recordFilename: null,
-    isRecording: false,
-    startTime: null,
-    currentTime: 0,
-    lastKnownTime: 0,
-    restartRequested: false,
-    currentItem: null,
-    error: null,
-    log: [],
-    lastScheduledTime: null,
-    layers: []
+const firebaseConfig = {
+    apiKey: "AIzaSyCdlninqPcUphfBu4lT7a2FopwOubptfN0",
+    authDomain: "studio-pro-2cc0a.firebaseapp.com",
+    projectId: "studio-pro-2cc0a",
+    storageBucket: "studio-pro-2cc0a.firebasestorage.app",
+    messagingSenderId: "633712652",
+    appId: "1:633712652:web:0a2d606dc4a2d8ab24be29",
+    measurementId: "G-M58HW6XL0E"
 };
 
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
 // ============================================================
-// FFmpeg HELPERS
+// STATE
 // ============================================================
+const state = {
+    library: [],    // { id, name, url, format, source: 'firebase'|'url' }
+    playlist: [],   // items added to schedule
+    isLive: false,
+    statusInterval: null,
+    timerInterval: null,
+    startTime: null,
+    layers: [],     // { id, type: 'text'|'image', content, x, y, size, w, visible }
+    prepLiveHls: null, // Track Hls instance for Prep
+    mainLiveHls: null  // Track Hls instance for Main
+};
 
-/**
- * Detect optimal FFmpeg flags based on source format
- */
-function getInputFlags(url) {
-    const lowerUrl = url.toLowerCase();
-    // HLS (.m3u8) or RTMP are already real-time streams
-    if (lowerUrl.includes('.m3u8') || lowerUrl.startsWith('rtmp')) {
-        return ['-i', url];
-    }
-    // Regular files (mp4, mkv, mov, avi, ts, webm) MUST be throttled to real-time
-    return ['-re', '-i', url];
+// Detect format from URL
+function detectFormat(url) {
+    const u = url.toLowerCase();
+    if (u.includes('.m3u8')) return 'm3u8';
+    if (u.startsWith('rtmp')) return 'rtmp';
+    if (u.includes('.mp4')) return 'mp4';
+    if (u.includes('.mkv')) return 'mkv';
+    if (u.includes('.mov')) return 'mov';
+    if (u.includes('.avi')) return 'avi';
+    if (u.includes('.ts')) return 'ts';
+    if (u.includes('.webm')) return 'webm';
+    if (u.includes('.flv')) return 'flv';
+    return 'video';
 }
 
-/**
- * Build Ingest (Source) FFmpeg args
- * Pushes raw content to local UDP
- */
-function buildIngestArgs(url) {
-    const inputFlags = getInputFlags(url);
-    return [
-        ...inputFlags,
-        '-c', 'copy',
-        '-f', 'mpegts',
-        'udp://127.0.0.1:9999?pkt_size=1316'
-    ];
+const isLiveFormat = (fmt) => ['m3u8', 'rtmp'].includes(fmt);
+
+// ============================================================
+// FIREBASE SYNC (Mute UI updates while syncing)
+// ============================================================
+async function saveStateToFirestore() {
+    try {
+        await setDoc(doc(db, "studio", "state"), {
+            library: state.library,
+            playlist: state.playlist,
+            layers: state.layers
+        });
+    } catch (err) {
+        console.error("Error saving state:", err);
+    }
 }
 
-/**
- * Build Mixer (Output) FFmpeg args
- * Reads from UDP, adds layers, and pushes to final destinations
- */
-function buildMixerArgs(destinations, config) {
-    const { bitrate = 2500, fps = 30, resolution = '1280x720', layers = [], recordStream = false, recordFilename = null, overlayText = "" } = config;
-    const [w, h] = resolution.split('x');
-
-    const activeLayers = layers.filter(l => l.visible !== false) || [];
-    const imageLayers = activeLayers.filter(l => l.type === 'image' && l.content);
-    const textLayers = activeLayers.filter(l => l.type === 'text' && l.content);
-
-    const extraInputs = [];
-    imageLayers.forEach(l => {
-        extraInputs.push('-i', l.content);
-    });
-
-    let filterStr = `[0:v]scale=${w}:${h}:force_original_aspect_ratio=decrease,pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2,setsar=1[v_base]`;
-    let lastLabel = 'v_base';
-
-    imageLayers.forEach((layer, idx) => {
-        const inputIdx = idx + 1;
-        const outLabel = `v_img_${idx}`;
-        const xVal = Math.round(layer.x * w) || 0;
-        const yVal = Math.round(layer.y * h) || 0;
-        const scaleW = layer.w ? Math.round(layer.w * w) : -1;
-        filterStr += `; [${inputIdx}:v]scale=${scaleW}:-1[img_${idx}] ; [${lastLabel}][img_${idx}]overlay=x=${xVal}:y=${yVal}[${outLabel}]`;
-        lastLabel = outLabel;
-    });
-
-    textLayers.forEach((layer, idx) => {
-        const outLabel = `v_txt_${idx}`;
-        const cleanText = (layer.content || "").replace(/'/g, "").replace(/:/g, "\\:");
-        const size = layer.size || 24;
-        const color = layer.color || 'white';
-        const bgColor = layer.bgColor || 'black';
-        const bgAlpha = layer.bgOpacity !== undefined ? layer.bgOpacity : 0.6;
-        let xVal = Math.round(layer.x * w) || 0;
-        const yVal = Math.round(layer.y * h) || 0;
-        if (layer.ticker) {
-            const speed = layer.speed || 100;
-            xVal = `w-mod(t*${speed},w+tw)`;
-        }
-        const fontPath = getFontPath();
-        filterStr += `; [${lastLabel}]drawtext=text='${cleanText}':fontfile='${fontPath}':fontcolor=${color}:fontsize=${size}:box=1:boxcolor='${bgColor}@${bgAlpha}':boxborderw=10:x=${xVal}:y=${yVal}[${outLabel}]`;
-        lastLabel = outLabel;
-    });
-
-    let destList = [...destinations];
-    if (recordStream && recordFilename) {
-        destList.push(`public/records/${recordFilename}`);
-    }
-
-    let outputParams = [];
-    if (destList.length > 1) {
-        const teeOutputs = destList.map(dest => `[f=flv]${dest}`).join('|');
-        filterStr += `; [${lastLabel}]copy[v_final]`;
-        outputParams = ['-f', 'tee', '-map', '[v_final]', '-map', '0:a:0', teeOutputs];
-    } else {
-        filterStr += `; [${lastLabel}]copy[v_final]`;
-        outputParams = ['-map', '[v_final]', '-map', '0:a:0', '-f', 'flv', destList[0]];
-    }
-
-    return [
-        '-i', 'udp://127.0.0.1:9999?listen=1&timeout=2000',
-        ...extraInputs,
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-tune', 'zerolatency',
-        '-filter_complex', filterStr,
-        '-b:v', `${bitrate}k`,
-        '-maxrate', `${bitrate}k`,
-        '-bufsize', `${bitrate * 2}k`,
-        '-g', String(fps * 2),
-        '-r', String(fps),
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        ...outputParams
-    ];
-}
-
-setInterval(() => {
-    if (!streamState.isLive || streamState.playlist.length === 0) return;
-    const now = new Date();
-    const currH = now.getHours().toString().padStart(2, '0');
-    const currM = now.getMinutes().toString().padStart(2, '0');
-    const timeStr = `${currH}:${currM}`;
-
-    const scheduledIndex = streamState.playlist.findIndex(item => item.scheduledTime === timeStr);
-    
-    if (scheduledIndex !== -1 && streamState.currentIndex !== scheduledIndex) {
-        if (streamState.lastScheduledTime !== timeStr) {
-            logStream(`⏰ Scheduled time reached for: ${streamState.playlist[scheduledIndex].name}`);
-            streamState.lastScheduledTime = timeStr;
+function listenToFirestore() {
+    onSnapshot(doc(db, "studio", "state"), (snapshot) => {
+        if (snapshot.exists()) {
+            const data = snapshot.data();
+            console.log("☁️ Firestore Sync:", data);
             
-            if (ffmpegProcess) {
-                ffmpegProcess.removeAllListeners('close');
-                ffmpegProcess.kill('SIGINT');
+            state.library = data.library || [];
+            state.playlist = data.playlist || [];
+            
+            // Only update layers if they exist in DB to prevent wiping local new unsaved layers
+            if (data.layers) {
+                state.layers = data.layers;
             }
-            runItem(scheduledIndex);
+            
+            renderLibrary();
+            renderPlaylist();
+            renderLayers();
         }
-    }
-}, 10000);
-
-/**
- * Log a message to the stream state log
- */
-function logStream(msg) {
-    const entry = `[${new Date().toLocaleTimeString()}] ${msg}`;
-    console.log(entry);
-    streamState.log.unshift(entry);
-    if (streamState.log.length > 50) streamState.log.pop(); // Keep last 50 entries
-}
-
-/**
- * Run Grand Mixer Architecture
- */
-function runIngest(index) {
-    if (!streamState.isLive || streamState.playlist.length === 0) return;
-
-    try {
-        const safeIndex = index % streamState.playlist.length;
-        const item = streamState.playlist[safeIndex];
-        if (!item) return;
-
-        streamState.currentIndex = safeIndex;
-        streamState.currentItem = { ...item, index: safeIndex };
-        
-        logStream(`🔥 [Source] Playing: ${item.name}`);
-
-        const args = buildIngestArgs(item.url);
-        ingestProcess = spawn(ffmpegPath, args);
-
-        ingestProcess.stderr.on('data', (data) => {
-            const line = data.toString();
-            if (line.includes('Error')) logStream(`❌ Ingest Error: ${line.substring(0, 80)}`);
-        });
-
-        ingestProcess.on('close', (code) => {
-            logStream(`✓ [Source] Item finished (exit: ${code})`);
-            if (streamState.isLive) {
-                runIngest(safeIndex + 1);
-            }
-        });
-        
-        if (!mixerProcess) runMixer();
-    } catch (err) {
-        logStream(`❌ Fatal Ingest Error: ${err.message}`);
-    }
-}
-
-function runMixer() {
-    if (!streamState.isLive) return;
-
-    try {
-        logStream('🏗️ [Mixer] Starting Broadcast Mixer...');
-
-        const args = buildMixerArgs(streamState.destinations, {
-            bitrate: streamState.bitrate,
-            fps: streamState.fps,
-            resolution: streamState.resolution,
-            layers: streamState.layers,
-            recordStream: streamState.recordStream,
-            recordFilename: streamState.recordFilename
-        });
-
-        mixerProcess = spawn(ffmpegPath, args);
-
-        mixerProcess.on('error', (err) => {
-            logStream(`❌ Mixer Failed: ${err.message}`);
-        });
-
-        mixerProcess.on('close', (code) => {
-            logStream(`✓ [Mixer] Broadcast stopped (exit: ${code})`);
-        });
-    } catch (err) {
-        logStream(`❌ Fatal Mixer Error: ${err.message}`);
-    }
-}
-
-// ============================================================
-// REST API ROUTES
-// ============================================================
-
-/**
- * POST /api/stream/start
- * Body: { playlist, destinations, bitrate, fps, resolution, overlayText, recordStream }
- */
-app.post('/api/stream/start', (req, res) => {
-    try {
-        if (streamState.isLive) {
-            return res.status(400).json({ error: 'Stream is already live. Stop it first.' });
-        }
-
-        const { playlist, destinations = [], bitrate = 2500, fps = 30, resolution = '1280x720', overlayText = '', recordStream = false, layers = [] } = req.body;
-
-        if (!playlist || playlist.length === 0) {
-            return res.status(400).json({ error: 'Playlist cannot be empty.' });
-        }
-        if (destinations.length === 0 && !recordStream) {
-            if (req.body.rtmpUrl && req.body.streamKey) {
-                const url = req.body.rtmpUrl.endsWith('/') ? `${req.body.rtmpUrl}${req.body.streamKey}` : `${req.body.rtmpUrl}/${req.body.streamKey}`;
-                destinations.push(url);
-            } else {
-                return res.status(400).json({ error: 'At least one RTMP destination (or local recording) is required.' });
-            }
-        }
-
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const recFile = recordStream ? `VOD_${timestamp}.flv` : null;
-
-        streamState.isLive = true;
-        streamState.playlist = playlist;
-        streamState.destinations = destinations;
-        streamState.overlayText = overlayText;
-        streamState.layers = layers;
-        streamState.recordStream = recordStream;
-        streamState.recordFilename = recFile;
-        streamState.startTime = Date.now();
-        streamState.currentIndex = 0;
-        streamState.error = null;
-        streamState.log = [];
-        streamState.lastScheduledTime = null;
-        streamState.bitrate = bitrate;
-        streamState.fps = fps;
-        streamState.resolution = resolution;
-
-        logStream(`🚀 Grand Mixer started → ${destinations.length} destination(s)`);
-        runIngest(0);
-
-        res.json({ success: true, message: 'Stream started successfully.', destinations });
-    } catch (err) {
-        console.error("Critical Start Error:", err);
-        res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', details: err.message });
-    }
-});
-
-app.post('/api/stream/stop', (req, res) => {
-    try {
-        logStream('⏹ Stream stopped by user.');
-        streamState.isLive = false;
-        if (ingestProcess) ingestProcess.kill('SIGKILL');
-        if (mixerProcess) mixerProcess.kill('SIGKILL');
-        res.json({ success: true, message: 'Stream stopped.' });
-    } catch (err) {
-        res.status(500).json({ error: 'INTERNAL_SERVER_ERROR', details: err.message });
-    }
-});
-
-/**
- * POST /api/stream/push-updates
- * Hot-update layers with seamless resumption
- */
-app.post('/api/stream/push-updates', async (req, res) => {
-    try {
-        if (!streamState.isLive) return res.status(400).json({ error: 'Stream is not live.' });
-        streamState.layers = req.body.layers || [];
-        logStream('✨ Pushing SEAMLESS graphic updates to Broadcast Mixer...');
-
-        if (mixerProcess) {
-            mixerProcess.kill('SIGKILL');
-            setTimeout(() => { if (streamState.isLive) runMixer(); }, 500);
-        } else {
-            runMixer();
-        }
-        res.json({ success: true, message: 'Graphics updated seamlessly.' });
-    } catch (err) {
-        res.status(500).json({ error: 'PUSH_ERROR', details: err.message });
-    }
-});
-
-/**
- * POST /api/stream/skip
- * Skip to next item in playlist
- */
-app.post('/api/stream/skip', (req, res) => {
-    if (!streamState.isLive) return res.status(400).json({ error: 'No active stream.' });
-    logStream('⏭ Skipped to next item.');
-    if (ingestProcess) ingestProcess.kill('SIGKILL');
-    res.json({ success: true, message: 'Skipping to next item.' });
-});
-
-/**
- * GET /api/stream/status
- */
-app.get('/api/stream/status', (req, res) => {
-    const elapsed = streamState.startTime
-        ? Math.floor((Date.now() - streamState.startTime) / 1000)
-        : 0;
-
-    const h = Math.floor(elapsed / 3600).toString().padStart(2, '0');
-    const m = Math.floor((elapsed % 3600) / 60).toString().padStart(2, '0');
-    const s = (elapsed % 60).toString().padStart(2, '0');
-
-    res.json({
-        isLive: streamState.isLive,
-        currentItem: streamState.currentItem,
-        currentIndex: streamState.currentIndex,
-        totalItems: streamState.playlist.length,
-        elapsedFormatted: `${h}:${m}:${s}`,
-        error: streamState.error,
-        log: streamState.log.slice(0, 10),
-        destinations: streamState.destinations,
-        overlayText: streamState.overlayText,
-        isRecording: streamState.recordStream
     });
-});
+}
 
-/**
- * GET /api/records
- */
-app.get('/api/records', (req, res) => {
-    const recordsDir = path.join(__dirname, 'public', 'records');
-    fs.readdir(recordsDir, (err, files) => {
-        if (err) return res.status(500).json({ error: 'Failed to read records directory' });
-        
-        const fileData = files.filter(f => f.endsWith('.flv')).map(f => {
-            const stats = fs.statSync(path.join(recordsDir, f));
-            return {
-                name: f,
-                size: (stats.size / (1024 * 1024)).toFixed(2) + ' MB',
-                date: stats.mtime,
-                url: `/records/${f}`
+// ============================================================
+// LIBRARY MANAGEMENT
+// ============================================================
+function addToLibrary(item) {
+    if (state.library.find(i => i.url === item.url)) return;
+    state.library.push({ ...item, id: Date.now() + Math.random() });
+    renderLibrary();
+    saveStateToFirestore();
+}
+
+function renderLibrary() {
+    const list = document.getElementById('library-list');
+    if (state.library.length === 0) {
+        list.innerHTML = '<div class="empty-state">لا توجد ملفات بعد. ارفع ملفاً أو أضف رابطاً.</div>';
+        return;
+    }
+
+    list.innerHTML = state.library.map(item => `
+        <div class="library-item">
+            <span class="lib-icon">${isLiveFormat(item.format) ? '📡' : '🎬'}</span>
+            <div style="flex:1;min-width:0;">
+                <div class="lib-name" title="${item.url}">${item.name}</div>
+                <div class="lib-format">${item.format} • ${item.source}</div>
+            </div>
+            <button class="add-to-playlist-btn" data-id="${item.id}" title="Add to Schedule">+</button>
+        </div>
+    `).join('');
+
+    list.querySelectorAll('.add-to-playlist-btn').forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation(); // prevent triggering row click
+            const item = state.library.find(i => String(i.id) === btn.dataset.id);
+            if (item) addToPlaylist(item);
+        };
+    });
+
+    // Handle row click for Preview
+    list.querySelectorAll('.library-item').forEach(row => {
+        row.onclick = () => {
+            const btn = row.querySelector('.add-to-playlist-btn');
+            if(btn) {
+                const item = state.library.find(i => String(i.id) === btn.dataset.id);
+                if (item) playInPrepMonitor(item);
+            }
+        };
+    });
+}
+
+// ============================================================
+// PLAYLIST MANAGEMENT
+// ============================================================
+function addToPlaylist(item) {
+    state.playlist.push({ ...item, pid: Date.now() + Math.random() });
+    renderPlaylist();
+    saveStateToFirestore();
+}
+
+function removeFromPlaylist(pid) {
+    state.playlist = state.playlist.filter(i => String(i.pid) !== String(pid));
+    renderPlaylist();
+    saveStateToFirestore();
+}
+
+function renderPlaylist(currentIndex = -1) {
+    const tbody = document.getElementById('playlist-body');
+    const countBadge = document.getElementById('playlist-count');
+    countBadge.textContent = `${state.playlist.length} عنصر`;
+
+    if (state.playlist.length === 0) {
+        tbody.innerHTML = `<tr class="empty-row"><td colspan="5">أضف عناصر من المكتبة لبناء جدول البث.</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = state.playlist.map((item, idx) => `
+        <tr class="${idx === currentIndex ? 'playing-row' : ''}">
+            <td class="row-num">${idx === currentIndex ? '▶' : idx + 1}</td>
+            <td class="row-name">${item.name}</td>
+            <td class="row-format">
+                <span class="format-tag ${isLiveFormat(item.format) ? 'live' : ''}">${item.format}</span>
+            </td>
+            <td>
+                <input type="time" class="schedule-input" data-pid="${item.pid}" value="${item.scheduledTime || ''}" style="background:var(--bg-card); color:white; border:1px solid #333; padding:5px; border-radius:4px;">
+            </td>
+            <td style="color:var(--muted);font-size:0.78rem;">${item.source === 'url' ? 'رابط خارجي' : item.source}</td>
+            <td>
+                <button class="remove-row-btn" data-pid="${item.pid}" title="Remove">🗑</button>
+            </td>
+        </tr>
+    `).join('');
+
+    tbody.querySelectorAll('.remove-row-btn').forEach(btn => {
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            removeFromPlaylist(btn.dataset.pid);
+        };
+    });
+
+    tbody.querySelectorAll('.schedule-input').forEach(inp => {
+        inp.onclick = (e) => e.stopPropagation();
+        inp.onchange = (e) => {
+            const item = state.playlist.find(i => String(i.pid) === e.target.dataset.pid);
+            if (item) {
+                item.scheduledTime = e.target.value;
+                saveStateToFirestore();
+            }
+        };
+    });
+
+    // Row click for Preview
+    tbody.querySelectorAll('tr').forEach(row => {
+        if (!row.classList.contains('empty-row')) {
+            row.style.cursor = 'pointer';
+            row.onclick = () => {
+                const pid = row.querySelector('.remove-row-btn').dataset.pid;
+                const item = state.playlist.find(i => String(i.pid) === String(pid));
+                if (item) playInPrepMonitor(item);
             };
-        }).sort((a,b) => b.date - a.date);
-
-        res.json(fileData);
+        }
     });
-});
+}
 
 /**
- * DELETE /api/records/:name
+ * Play an item in the Prep (Preview) Monitor ONLY.
+ * Does not affect the live stream.
  */
-app.delete('/api/records/:name', (req, res) => {
-    const filename = req.params.name;
-    // VERY BASIC SANITIZATION
-    if (filename.includes('..') || filename.includes('/')) return res.status(400).json({error: 'Invalid filename'});
+function playInPrepMonitor(item) {
+    const prepEl = document.getElementById('prep-player');
+    if (!prepEl || !item || !item.url) {
+        console.warn("⚠️ Cannot preview: monitor or item missing", item);
+        return;
+    }
+
+    console.log("🎞️ Prepping item:", item.name, "URL:", item.url);
     
-    const fp = path.join(__dirname, 'public', 'records', filename);
-    if (fs.existsSync(fp)) {
-        fs.unlinkSync(fp);
-        res.json({ success: true });
+    // UI Feedback Flash
+    const wrap = document.getElementById('prep-screen-wrap');
+    wrap.style.borderColor = "#fff";
+    setTimeout(() => wrap.style.borderColor = "#4ade80", 500);
+
+    // CLEANUP PREVIOUS HLS
+    if (state.prepLiveHls) {
+        state.prepLiveHls.destroy();
+        state.prepLiveHls = null;
+    }
+
+    prepEl.pause();
+    prepEl.src = ""; 
+    prepEl.load();
+
+    const format = detectFormat(item.url);
+    
+    // Use Proxy for external m3u8 to avoid CORS issues
+    let videoUrl = item.url;
+    if (format === 'm3u8' && (item.url.startsWith('http') && !item.url.includes(window.location.host))) {
+        videoUrl = `/api/proxy?url=${encodeURIComponent(item.url)}`;
+    }
+
+    if (format === 'm3u8') {
+        if (window.Hls && Hls.isSupported()) {
+            const hls = new Hls({
+                enableWorker: true,
+                lowLatencyMode: true,
+                manifestLoadingMaxRetry: 2
+            });
+            state.prepLiveHls = hls;
+            hls.loadSource(videoUrl);
+            hls.attachMedia(prepEl);
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                const playPromise = prepEl.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch(e => {
+                        if (e.name !== 'AbortError') console.error("Play error:", e);
+                    });
+                }
+            });
+            hls.on(Hls.Events.ERROR, (event, data) => {
+                if (data.fatal) {
+                    console.error("Fatal HLS Error:", data);
+                    if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                        console.warn("Network error encountered. This might be CORS or a dead link.");
+                        hls.startLoad(); // Try to recover
+                    } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                        hls.recoverMediaError();
+                    } else {
+                        hls.destroy();
+                    }
+                }
+            });
+        } else if (prepEl.canPlayType('application/vnd.apple.mpegurl')) {
+            prepEl.src = item.url;
+            prepEl.play().catch(e => { if(e.name !== 'AbortError') console.warn(e); });
+        } else {
+            alert("المتصفح لا يدعم تشغيل Hls/m3u8.");
+        }
     } else {
-        res.status(404).json({ error: 'File not found' });
+        prepEl.src = item.url;
+        const playPromise = prepEl.play();
+        if (playPromise !== undefined) {
+            playPromise.catch(e => {
+                if(e.name !== 'AbortError') console.error("Manual Play Failed:", e);
+            });
+        }
     }
-});
+}
 
-/**
- * GET /api/system/health
- */
-app.get('/api/system/health', (req, res) => {
-    const totalMem = os.totalmem();
-    const freeMem = os.freemem();
-    const usedMem = totalMem - freeMem;
-    const memUsage = ((usedMem / totalMem) * 100).toFixed(1);
 
-    const cpus = os.cpus();
-    let cpuUsage = 0;
-    if (cpus && cpus.length > 0) {
-        // Very basic CPU rough load
-        const load = os.loadavg()[0];
-        cpuUsage = ((load / cpus.length) * 100).toFixed(1);
+// ============================================================
+// LAYER & GRAPHICS MANAGEMENT
+// ============================================================
+function renderLayers() {
+    console.log("🎨 Rendering Layers:", state.layers.length);
+    const list = document.getElementById('layers-list');
+    const container = document.getElementById('prep-layers-container');
+    
+    if (!list || !container) return;
+    
+    if (state.layers.length === 0) {
+        list.innerHTML = '<div class="empty-state">لا توجد طبقات إضافية. أضف نصاً أو شعاراً.</div>';
+        container.innerHTML = '';
+        return;
     }
 
-    res.json({
-        cpuUsage,
-        memUsage,
-        uptime: os.uptime(),
-        ffmpegRunning: ffmpegProcess !== null
+    // 1. Render Sidebar List
+    list.innerHTML = state.layers.map(layer => `
+        <div class="library-item layer-item" style="padding: 10px; border-bottom: 1px solid var(--border); ${!layer.visible ? 'opacity:0.5' : ''}">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span class="lib-icon">${layer.type === 'text' ? '✍️' : '🖼️'} ${layer.type === 'text' ? 'نص' : 'صورة'}</span>
+                <div style="display:flex; gap:5px;">
+                    <button class="icon-btn toggle-layer-btn" data-id="${layer.id}" title="إخفاء/إظهار">${layer.visible ? '👁️' : '🙈'}</button>
+                    <button class="icon-btn remove-layer-btn" data-id="${layer.id}" title="حذف">🗑</button>
+                </div>
+            </div>
+            <div style="flex:1;min-width:0;">
+                <input type="text" value="${layer.content}" class="layer-content-input" data-id="${layer.id}" style="width:100%; background:rgba(255,255,255,0.05); border:1px solid #333; color:white; font-size:0.85rem; padding:8px; border-radius:4px; margin-bottom:8px;" placeholder="المحتوى...">
+                
+                <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px;">
+                    <div class="field">
+                        <label style="font-size:0.6rem; color:var(--muted);">X / Y Position</label>
+                        <div style="font-size:0.7rem; color:white;">${Math.round(layer.x * 100)}% | ${Math.round(layer.y * 100)}%</div>
+                    </div>
+                    <div class="field">
+                        <label style="font-size:0.6rem; color:var(--muted);">الحجم</label>
+                        <input type="number" class="layer-size-input" data-id="${layer.id}" value="${layer.type === 'text' ? (layer.size || 24) : Math.round((layer.w || 0.15) * 100)}" style="width:100%; background:rgba(0,0,0,0.3); border:1px solid #333; color:white; font-size:0.7rem; padding:2px; border-radius:4px;">
+                    </div>
+                </div>
+
+                ${layer.type === 'text' ? `
+                <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-top:8px; align-items:center;">
+                    <div class="field">
+                        <label style="font-size:0.6rem; color:var(--muted);">لون الخط</label>
+                        <input type="color" class="layer-color-input" data-id="${layer.id}" value="${layer.color || '#ffffff'}" style="width:100%; height:20px; border:none; background:none; cursor:pointer;">
+                    </div>
+                    <div class="field">
+                        <label style="font-size:0.6rem; color:var(--muted);">الخلفية</label>
+                        <input type="color" class="layer-bgcolor-input" data-id="${layer.id}" value="${layer.bgColor || '#000000'}" style="width:100%; height:20px; border:none; background:none; cursor:pointer;">
+                    </div>
+                    <div class="field" style="text-align:center;">
+                        <label style="font-size:0.6rem; color:var(--muted);">شريط متحرك</label>
+                        <input type="checkbox" class="layer-ticker-input" data-id="${layer.id}" ${layer.ticker ? 'checked' : ''}>
+                    </div>
+                </div>
+                ` : ''}
+            </div>
+        </div>
+    `).join('');
+
+    // 2. Render On-Screen Overlays (Draggable)
+    container.innerHTML = state.layers.map(layer => {
+        if (!layer.visible) return '';
+        const style = `
+            position: absolute; 
+            left: ${layer.x * 100}%; 
+            top: ${layer.y * 100}%; 
+            pointer-events: auto; 
+            cursor: move; 
+            user-select: none;
+            white-space: nowrap;
+        `;
+        
+        if (layer.type === 'text') {
+            const fontColor = layer.color || '#white';
+            const bgColor = layer.bgColor || 'rgba(0,0,0,0.6)';
+            
+            return `<div class="draggable-layer ${layer.ticker ? 'ticker-anim' : ''}" data-id="${layer.id}" style="${style} background:${bgColor}; color:${fontColor}; padding:5px 10px; border:1px solid rgba(255,255,255,0.2); border-radius:4px; font-size:${layer.size || 18}px; z-index:100; font-family:'Tajawal', sans-serif;">
+                ${layer.content || 'نص جديد'}
+            </div>`;
+        } else {
+            return `<div class="draggable-layer" data-id="${layer.id}" style="${style} border:1px solid #4ade80; border-radius:4px; z-index:100;"><img src="${layer.content}" style="display:block; max-width:${(layer.w || 0.15) * 400}px; pointer-events:none;"></div>`;
+        }
+    }).join('');
+
+    // Event Listeners for List
+    list.querySelectorAll('.remove-layer-btn').forEach(btn => {
+        btn.onclick = () => {
+            state.layers = state.layers.filter(l => String(l.id) !== btn.dataset.id);
+            renderLayers();
+            saveStateToFirestore();
+        };
     });
-});
 
-/**
- * GET /api/proxy
- * Simple CORS Proxy for HLS feeds
- */
-app.get('/api/proxy', async (req, res) => {
-    const targetUrl = req.query.url;
-    if (!targetUrl) return res.status(400).send('URL is required');
+    list.querySelectorAll('.toggle-layer-btn').forEach(btn => {
+        btn.onclick = () => {
+            const layer = state.layers.find(l => String(l.id) === btn.dataset.id);
+            if (layer) layer.visible = !layer.visible;
+            renderLayers();
+            saveStateToFirestore();
+        };
+    });
+
+    list.querySelectorAll('.layer-content-input').forEach(inp => {
+        inp.onchange = (e) => {
+            const layer = state.layers.find(l => String(l.id) === inp.dataset.id);
+            if (layer) layer.content = e.target.value;
+            renderLayers();
+            saveStateToFirestore();
+        };
+    });
+
+    list.querySelectorAll('.layer-size-input').forEach(inp => {
+        inp.onchange = (e) => {
+            const layer = state.layers.find(l => String(l.id) === inp.dataset.id);
+            if (layer) {
+                const val = parseInt(e.target.value);
+                if (layer.type === 'text') layer.size = val;
+                else layer.w = val / 100;
+            }
+            renderLayers();
+            saveStateToFirestore();
+        };
+    });
+
+    list.querySelectorAll('.layer-color-input, .layer-bgcolor-input, .layer-ticker-input').forEach(inp => {
+        inp.onchange = (e) => {
+            const layer = state.layers.find(l => String(l.id) === inp.dataset.id);
+            if (layer) {
+                if (e.target.type === 'checkbox') {
+                    layer.ticker = e.target.checked;
+                } else if (e.target.classList.contains('layer-color-input')) {
+                    layer.color = e.target.value;
+                } else if (e.target.classList.contains('layer-bgcolor-input')) {
+                    layer.bgColor = e.target.value;
+                }
+            }
+            renderLayers();
+            saveStateToFirestore();
+        };
+    });
+
+    // Live Sync (Push Updates)
+    const pushBtn = document.getElementById('push-to-live-btn');
+    if (pushBtn) {
+        pushBtn.onclick = async () => {
+            if (!state.isLive) {
+                alert('عذراً، يجب أن يكون البث مباشراً أولاً لكي تتمكن من تحديث الجرافيك.');
+                return;
+            }
+            try {
+                pushBtn.disabled = true;
+                pushBtn.textContent = '🔄 جارٍ المزامنة...';
+                
+                const res = await fetch('/api/stream/push-updates', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ layers: state.layers })
+                });
+                
+                if (!res.ok) throw new Error('فشل التحديث');
+                
+                // Success feedback
+                pushBtn.textContent = '✅ تم التحديث';
+                pushBtn.style.background = 'var(--green)';
+                setTimeout(() => {
+                    pushBtn.disabled = false;
+                    pushBtn.textContent = '🔄 تحديث البث';
+                    pushBtn.style.background = 'var(--accent2)';
+                }, 3000);
+            } catch (err) {
+                console.error(err);
+                alert('فشل في مزامنة الجرافيك مع البث المباشر.');
+                pushBtn.disabled = false;
+                pushBtn.textContent = '🔄 تحديث البث';
+            }
+        };
+    }
+}
+
+
+let activeDraggingLayer = null;
+function setupDraggableLayers() {
+    const draggables = document.querySelectorAll('.draggable-layer');
+    const container = document.getElementById('prep-screen-wrap');
+    
+    draggables.forEach(el => {
+        el.onmousedown = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            const lid = el.dataset.id;
+            const layerState = state.layers.find(l => String(l.id) === String(lid));
+            if (!layerState) return;
+
+            el.classList.add('is-dragging');
+            
+            const rect = container.getBoundingClientRect();
+            const elRect = el.getBoundingClientRect();
+            
+            // Calculate mouse offset within the element
+            const offsetX = e.clientX - elRect.left;
+            const offsetY = e.clientY - elRect.top;
+
+            const moveHandler = (moveEvent) => {
+                // Determine new position relative to container
+                let x = (moveEvent.clientX - rect.left - offsetX) / rect.width;
+                let y = (moveEvent.clientY - rect.top - offsetY) / rect.height;
+                
+                // Bounds
+                x = Math.max(0, Math.min(0.95, x));
+                y = Math.max(0, Math.min(0.95, y));
+                
+                layerState.x = x;
+                layerState.y = y;
+                
+                // Super fast visual update
+                el.style.left = (x * 100) + '%';
+                el.style.top = (y * 100) + '%';
+            };
+            
+            const stopHandler = () => {
+                window.removeEventListener('mousemove', moveHandler);
+                window.removeEventListener('mouseup', stopHandler);
+                el.classList.remove('is-dragging');
+                renderLayers(); // Final sync for sidebar and persistence
+                saveStateToFirestore();
+            };
+            
+            window.addEventListener('mousemove', moveHandler);
+            window.addEventListener('mouseup', stopHandler);
+        };
+    });
+}
+
+
+// ============================================================
+// STREAM CONTROL
+// ============================================================
+async function startStream() {
+    // Get all destinations
+    const destinations = [];
+    document.querySelectorAll('.dest-row').forEach(row => {
+        const url = row.querySelector('.dest-url').value.trim();
+        const key = row.querySelector('.dest-key').value.trim();
+        if (url && key) {
+            const rtmpDest = url.endsWith('/') ? `${url}${key}` : `${url}/${key}`;
+            destinations.push(rtmpDest);
+        }
+    });
+
+    const recordStream = document.getElementById('record-stream-chk').checked;
+    const resolution = document.getElementById('resolution').value;
+    const fps = document.getElementById('fps').value;
+    const bitrate = document.getElementById('bitrate').value;
+
+    if (destinations.length === 0) return alert('الرجاء إدخال رابط مفتاح بث واحد على الأقل.');
+    if (state.playlist.length === 0) return alert('جدول البث فارغ. أضف عنصراً على الأقل.');
 
     try {
-        const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
-        const response = await fetch(targetUrl);
-        
-        // Forward headers
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Content-Type', response.headers.get('content-type') || 'application/octet-stream');
-        
-        // If it's a playlist, we might need to rewrite relative paths (advanced, but simple proxy for now works for absolute links)
-        response.body.pipe(res);
-    } catch (err) {
-        res.status(500).send('Proxy Error: ' + err.message);
-    }
-});
+        const goBtn = document.getElementById('go-live-btn');
+        goBtn.disabled = true;
+        goBtn.querySelector('.btn-text').textContent = 'جارٍ الاتصال...';
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`\n🎬 Grand Studio Server running at http://localhost:${PORT}\n`);
-});
+        // Add timeout protection
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+        const res = await fetch('/api/stream/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            signal: controller.signal,
+            body: JSON.stringify({
+                playlist: state.playlist.map(i => ({ url: i.url, name: i.name, format: i.format, scheduledTime: i.scheduledTime })),
+                destinations,
+                layers: state.layers,
+                recordStream,
+                resolution,
+                fps: parseInt(fps),
+                bitrate: parseInt(bitrate)
+            })
+        });
+
+        clearTimeout(timeoutId);
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'فشل في بدء البث');
+
+        setLiveState(true);
+        startStatusPolling();
+        startTimer();
+
+    } catch (err) {
+        alert(`خطأ: ${err.message}`);
+        document.getElementById('go-live-btn').disabled = false;
+        document.getElementById('go-live-btn').querySelector('.btn-text').textContent = 'ابدأ البث';
+    }
+}
+
+async function stopStream() {
+    try {
+        await fetch('/api/stream/stop', { method: 'POST' });
+        setLiveState(false);
+        stopStatusPolling();
+        stopTimer();
+    } catch (err) {
+        console.error('Stop error:', err);
+    }
+}
+
+async function skipItem() {
+    await fetch('/api/stream/skip', { method: 'POST' });
+}
+
+// ============================================================
+// STATUS POLLING
+// ============================================================
+function startStatusPolling() {
+    state.statusInterval = setInterval(fetchStatus, 3000);
+    fetchStatus(); // immediate first call
+}
+
+function stopStatusPolling() {
+    clearInterval(state.statusInterval);
+}
+
+async function fetchStatus() {
+    try {
+        const res = await fetch('/api/stream/status');
+        if (!res.ok) return; // Silent skip if server is restarting
+        
+        const contentType = res.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) return;
+
+        const data = await res.json();
+
+        if (!data.isLive && state.isLive) {
+            // Stream ended on server side
+            setLiveState(false);
+            stopTimer();
+            return;
+        }
+
+        // Update dashboard
+        const cur = data.currentItem;
+        document.getElementById('dash-current').textContent = cur ? cur.name : '—';
+        document.getElementById('np-title').textContent = cur ? cur.name : '—';
+
+        // Update live monitor
+        const liveEl = document.getElementById('live-player');
+        if (cur && cur.url && liveEl.dataset.currentSrc !== cur.url) {
+            liveEl.dataset.currentSrc = cur.url;
+            
+            // Cleanup previous Hls for main
+            if (state.mainLiveHls) {
+                state.mainLiveHls.destroy();
+                state.mainLiveHls = null;
+            }
+
+            if (cur.url.startsWith('rtmp')) {
+                liveEl.style.display = 'none'; 
+            } else if (cur.url.includes('.m3u8')) {
+                liveEl.style.display = 'block';
+                if (window.Hls && Hls.isSupported()) {
+                    const hls = new Hls({ lowLatencyMode: true });
+                    state.mainLiveHls = hls;
+                    hls.loadSource(cur.url);
+                    hls.attachMedia(liveEl);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                        liveEl.play().catch(e => {});
+                    });
+                } else if (liveEl.canPlayType('application/vnd.apple.mpegurl')) {
+                    liveEl.src = cur.url;
+                    liveEl.play().catch(e => {});
+                }
+            } else {
+                liveEl.src = cur.url;
+                liveEl.style.display = 'block';
+                liveEl.play().catch(e => {});
+            }
+        } else if (!cur) {
+            liveEl.style.display = 'none';
+        }
+
+        const nextIdx = (data.currentIndex + 1) % (data.totalItems || 1);
+        const next = state.playlist[nextIdx];
+        document.getElementById('dash-next').textContent = next ? next.name : '(restart)';
+        document.getElementById('dash-items').textContent = `${data.currentIndex + 1} / ${data.totalItems}`;
+
+        // Update log
+        if (data.log && data.log.length) {
+            const logEl = document.getElementById('stream-log');
+            logEl.innerHTML = data.log.map(l => `<div>${l}</div>`).join('');
+        }
+
+        // Highlight current playlist row
+        renderPlaylist(data.currentIndex);
+
+        // Fetch Health Data
+        const healthRes = await fetch('/api/system/health');
+        if (healthRes.ok) {
+            const hContentType = healthRes.headers.get("content-type");
+            if (hContentType && hContentType.includes("application/json")) {
+                const hData = await healthRes.json();
+                document.getElementById('h-cpu').textContent = hData.cpuUsage + '%';
+                document.getElementById('h-ram').textContent = (hData.memUsage || 0) + '%';
+                
+                const hours = Math.floor(hData.uptime / 3600);
+                const minutes = Math.floor((hData.uptime % 3600) / 60);
+                document.getElementById('h-uptime').textContent = `${hours}h ${minutes}m`;
+            }
+        }
+
+    } catch (err) {
+        console.warn('Status poll error:', err);
+    }
+}
+
+// ============================================================
+// UI STATE
+// ============================================================
+function setLiveState(live) {
+    state.isLive = live;
+
+    const pill = document.getElementById('status-pill');
+    const statusText = document.getElementById('status-text');
+    const liveDash = document.getElementById('live-dashboard');
+    const goLiveBtn = document.getElementById('go-live-btn');
+    const stopBtn = document.getElementById('stop-btn');
+
+    if (live) {
+        pill.className = 'status-pill live';
+        statusText.textContent = 'مباشر الآن';
+        liveDash.classList.remove('hidden');
+        goLiveBtn.classList.add('hidden');
+        stopBtn.classList.remove('hidden');
+    } else {
+        pill.className = 'status-pill offline';
+        statusText.textContent = 'غير متصل';
+        liveDash.classList.add('hidden');
+        goLiveBtn.classList.remove('hidden');
+        goLiveBtn.disabled = false;
+        goLiveBtn.querySelector('.btn-text').textContent = 'ابدأ البث';
+        stopBtn.classList.add('hidden');
+        document.getElementById('np-title').textContent = '—';
+    }
+}
+
+// ============================================================
+// TIMER
+// ============================================================
+function startTimer() {
+    state.startTime = Date.now();
+    state.timerInterval = setInterval(() => {
+        const diff = Date.now() - state.startTime;
+        const h = Math.floor(diff / 3600000).toString().padStart(2, '0');
+        const m = Math.floor((diff % 3600000) / 60000).toString().padStart(2, '0');
+        const s = Math.floor((diff % 60000) / 1000).toString().padStart(2, '0');
+        document.getElementById('timer').textContent = `${h}:${m}:${s}`;
+    }, 1000);
+}
+
+function stopTimer() {
+    clearInterval(state.timerInterval);
+    document.getElementById('timer').textContent = '00:00:00';
+}
+
+// ============================================================
+// EVENT LISTENERS & INIT
+// ============================================================
+
+function initStudio() {
+    // ================== EVENT LISTENERS (Non-blocking) ==================
+
+    // Add Text Layer
+    document.getElementById('add-text-layer-btn').onclick = () => {
+        state.layers.push({
+            id: Date.now(),
+            type: 'text',
+            content: 'نص جديد',
+            x: 0.1,
+            y: 0.1,
+            size: 24,
+            visible: true
+        });
+        renderLayers();
+        saveStateToFirestore();
+    };
+
+    // Add Image Layer
+    document.getElementById('add-image-layer-btn').onclick = () => {
+        const url = prompt("أدخل رابط الصورة (PNG/JPG):");
+        if (url) {
+            state.layers.push({
+                id: Date.now(),
+                type: 'image',
+                content: url,
+                x: 0.1,
+                y: 0.1,
+                w: 0.15,
+                visible: true
+            });
+            renderLayers();
+            saveStateToFirestore();
+        }
+    };
+
+    // إضافة عبر رابط
+    document.getElementById('add-url-btn').onclick = () => {
+        try {
+            const url = document.getElementById('url-input').value.trim();
+            let name = document.getElementById('url-name').value.trim();
+            if (!url) return alert('الرجاء إدخال رابط.');
+            if (!name) name = url.split('/').pop() || 'ميديا خارجية';
+            const format = detectFormat(url);
+            addToLibrary({ name, url, format, source: 'url' });
+            document.getElementById('url-input').value = '';
+            document.getElementById('url-name').value = '';
+        } catch(e) {
+            console.error(e);
+            alert("حدث خطأ أثناء الإضافة.");
+        }
+    };
+
+    // RTMP Presets
+    document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.onclick = () => {
+            const destCols = document.querySelectorAll('.dest-url');
+            if (destCols.length > 0) {
+                destCols[destCols.length - 1].value = btn.dataset.rtmp;
+                const keyCols = document.querySelectorAll('.dest-key');
+                if (keyCols.length > 0) keyCols[keyCols.length - 1].focus();
+            }
+        };
+    });
+
+    // Toggle stream key visibility
+    const destContainer = document.getElementById('destinations-container');
+    if (destContainer) {
+        destContainer.addEventListener('click', (e) => {
+            if (e.target.classList.contains('toggle-key-btn')) {
+                const inp = e.target.previousElementSibling;
+                inp.type = inp.type === 'password' ? 'text' : 'password';
+            }
+        });
+    }
+
+    // Add Destination Row
+    const addDestBtn = document.getElementById('add-dest-btn');
+    if (addDestBtn) {
+        addDestBtn.onclick = () => {
+            const cont = document.getElementById('destinations-container');
+            const row = document.createElement('div');
+            row.className = 'dest-row';
+            row.style.marginTop = '10px';
+            row.style.paddingTop = '10px';
+            row.style.borderTop = '1px solid #333';
+            row.innerHTML = `
+                <div class="field">
+                    <label>رابط منصة إضافية</label>
+                    <input type="text" class="dest-url" placeholder="rtmp://...">
+                </div>
+                <div class="field">
+                    <label>مفتاح البث</label>
+                    <div class="key-wrap">
+                        <input type="password" class="dest-key" placeholder="live_...">
+                        <button type="button" class="icon-btn toggle-key-btn">👁</button>
+                        <button type="button" class="danger-mini-btn remove-dest-btn" style="margin-right: 5px;">✖</button>
+                    </div>
+                </div>
+            `;
+            cont.appendChild(row);
+            row.querySelector('.remove-dest-btn').onclick = () => row.remove();
+        };
+    }
+
+    // Clear Library
+    document.getElementById('clear-library-btn').onclick = () => {
+        if (confirm('هل تريد مسح المكتبة بالكامل؟')) {
+            state.library = [];
+            renderLibrary();
+            saveStateToFirestore();
+        }
+    };
+
+    // Clear Playlist
+    document.getElementById('clear-playlist-btn').onclick = () => {
+        if (confirm('هل تريد مسح جدول البث بالكامل؟')) {
+            state.playlist = [];
+            renderPlaylist();
+            saveStateToFirestore();
+        }
+    };
+
+    document.getElementById('go-live-btn').onclick = startStream;
+    document.getElementById('stop-btn').onclick = stopStream;
+    document.getElementById('skip-btn').onclick = skipItem;
+
+    // ================== FIREBASE INIT (Async) ==================
+    (async () => {
+        try {
+            listenToFirestore();
+        } catch(e) { console.warn("Firestore Listen Failed:", e); }
+
+        try {
+            const docSnap = await getDoc(doc(db, "studio", "settings"));
+            if (docSnap.exists()) {
+                const st = docSnap.data();
+                const cont = document.getElementById('destinations-container');
+                
+                // If we have default settings from settings.html
+                if (st.defaultRtmpUrl || st.defaultStreamKey) {
+                    const urlInput = cont.querySelector('.dest-url');
+                    const keyInput = cont.querySelector('.dest-key');
+                    if (urlInput && !urlInput.value) urlInput.value = st.defaultRtmpUrl || '';
+                    if (keyInput && !keyInput.value) keyInput.value = st.defaultStreamKey || '';
+                }
+
+                // If we have multiple destinations saved from a previous session
+                if (st.destinations && st.destinations.length > 0) {
+                    cont.innerHTML = '';
+                    st.destinations.forEach(dest => {
+                        const row = document.createElement('div');
+                        row.className = 'dest-row';
+                        row.style.marginTop = '10px';
+                        row.style.paddingTop = '10px';
+                        row.style.borderTop = '1px solid #333';
+                        row.innerHTML = `
+                            <div class="field">
+                                <label>رابط منصة بث</label>
+                                <input type="text" class="dest-url" value="${dest.url}">
+                            </div>
+                            <div class="field">
+                                <label>مفتاح البث</label>
+                                <div class="key-wrap">
+                                    <input type="password" class="dest-key" value="${dest.key}">
+                                    <button type="button" class="icon-btn toggle-key-btn">👁</button>
+                                    <button type="button" class="danger-mini-btn remove-dest-btn" style="margin-right: 5px;">✖</button>
+                                </div>
+                            </div>
+                        `;
+                        cont.appendChild(row);
+                        row.querySelector('.remove-dest-btn').onclick = () => row.remove();
+                    });
+                }
+            }
+        } catch (e) {
+            console.warn("Could not load settings:", e);
+        }
+
+        // Check if stream is already running
+        fetchStatus().then(() => {
+            fetch('/api/stream/status')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.isLive) {
+                        setLiveState(true);
+                        startStatusPolling();
+                        startTimer();
+                    }
+                }).catch(e=>{});
+        });
+    })();
+}
+
+// Initialize based on readyStore (Modules are deferred, so DOM might be ready already)
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initStudio);
+} else {
+    initStudio();
+}
+
+
