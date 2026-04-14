@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>استوديو جراند برو | غرفة التحكم بالبث</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="studio.css">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=Tajawal:wght@300;400;500;700;800&display=swap"
+        rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+
+<body class="grand-edition">
+    <div class="ambient-bg"></div>
+
+    <!-- Unified Navbar -->
+    <nav class="navbar" style="padding: 15px 40px; height: auto;">
+        <a href="index.html" class="brand">
+            <div class="brand-logo">▶</div>
+            <div class="brand-text">LiveStudio<span>Pro</span></div>
+        </a>
+
+        <ul class="nav-links">
+            <li><a href="index.html">الرئيسية</a></li>
+            <li><a href="studio.html" class="active">الاستوديو</a></li>
+            <li><a href="records.html">الأرشيف</a></li>
+            <li><a href="settings.html">الإعدادات</a></li>
+        </ul>
+
+        <div class="status-center" style="display: flex; align-items: center; gap: 20px;">
+            <div id="status-pill" class="status-pill offline" style="margin: 0;">
+                <div class="status-dot"></div>
+                <span id="status-text">غير متصل</span>
+            </div>
+            <div id="timer" class="timer" style="font-size: 1rem;">00:00:00</div>
+        </div>
+
+        <div class="nav-actions">
+            <div class="now-playing" id="now-playing-header"
+                style="text-align: left; display: flex; flex-direction: column; align-items: flex-end;">
+                <span class="np-label" style="font-size: 0.6rem; opacity: 0.7;">يُشغَّل الآن</span>
+                <span id="np-title"
+                    style="font-size: 0.8rem; font-weight: 700; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">—</span>
+            </div>
+        </div>
+    </nav>
+
+    <!-- التخطيط الرئيسي: 3 أعمدة -->
+    <main class="studio-layout">
+
+        <!-- ======================== اليسار: مكتبة الميديا ======================== -->
+        <aside class="sidebar left-sidebar">
+
+            <!-- إضافة عبر رابط -->
+            <div class="panel url-panel">
+                <div class="panel-header">
+                    <h3>🔗 إضافة عبر رابط</h3>
+                </div>
+                <div class="url-input-row">
+                    <input type="text" id="url-input" placeholder="https://... أو rtmp://... أو .m3u8">
+                    <input type="text" id="url-name" placeholder="الاسم (اختياري)">
+                </div>
+                <div class="format-badges">
+                    <span class="badge">mp4</span>
+                    <span class="badge">mkv</span>
+                    <span class="badge">m3u8</span>
+                    <span class="badge">rtmp</span>
+                    <span class="badge">ts</span>
+                    <span class="badge">webm</span>
+                    <span class="badge">mov</span>
+                </div>
+                <button id="add-url-btn" class="solid-btn">إضافة إلى المكتبة</button>
+            </div>
+
+            <!-- قائمة المكتبة -->
+            <div class="panel library-panel">
+                <div class="panel-header">
+                    <h3>🗂️ المكتبة</h3>
+                    <button id="clear-library-btn" class="danger-mini-btn">مسح الكل</button>
+                </div>
+                <div id="library-list" class="scrollable-list">
+                    <div class="empty-state">لا توجد ملفات بعد. ارفع ملفاً أو أضف رابطاً.</div>
+                </div>
+            </div>
+
+        </aside>
+
+        <!-- ======================== الوسط: الجدول + لوحة البث ======================== -->
+        <section class="center-section">
+
+            <!-- لوحة البث المباشر (تظهر عند البث) -->
+            <div id="live-dashboard" class="live-dashboard hidden">
+                <div class="dashboard-row">
+                    <div class="dash-card">
+                        <div class="dash-label">يُشغَّل الآن</div>
+                        <div id="dash-current" class="dash-value">—</div>
+                    </div>
+                    <div class="dash-card">
+                        <div class="dash-label">التالي</div>
+                        <div id="dash-next" class="dash-value">—</div>
+                    </div>
+                    <div class="dash-card">
+                        <div class="dash-label">العناصر</div>
+                        <div id="dash-items" class="dash-value">0 / 0</div>
+                    </div>
+                </div>
+
+                <div class="health-dash" style="display: flex; gap: 10px; margin-bottom: 25px;">
+                    <div class="health-card"
+                        style="flex: 1; background: var(--bg-hover); padding: 10px; border-radius: 8px; text-align: center;">
+                        <span class="h-label"
+                            style="display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 5px;">CPU
+                            الخادم</span>
+                        <span id="h-cpu" style="font-weight: 700; color: #4ade80;">0%</span>
+                    </div>
+                    <div class="health-card"
+                        style="flex: 1; background: var(--bg-hover); padding: 10px; border-radius: 8px; text-align: center;">
+                        <span class="h-label"
+                            style="display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 5px;">استهلاك
+                            الذاكرة</span>
+                        <span id="h-ram" style="font-weight: 700; color: #60a5fa;">0%</span>
+                    </div>
+                    <div class="health-card"
+                        style="flex: 1; background: var(--bg-hover); padding: 10px; border-radius: 8px; text-align: center;">
+                        <span class="h-label"
+                            style="display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 5px;">زمن
+                            التشغيل</span>
+                        <span id="h-uptime" style="font-weight: 700;">0s</span>
+                    </div>
+                </div>
+                <div class="log-box">
+                    <div class="log-header">📋 سجل البث</div>
+                    <div id="stream-log" class="log-entries"></div>
+                </div>
+                <button id="skip-btn" class="skip-btn" style="margin-top: 10px;">⏭ تخطي للتالي</button>
+            </div>
+
+            <!-- منشئ قائمة التشغيل -->
+            <div class="panel playlist-panel">
+                <div class="panel-header">
+                    <h3>📺 جدول البث</h3>
+                    <div class="header-controls">
+                        <span id="playlist-count" class="count-badge">0 عناصر</span>
+                        <button id="clear-playlist-btn" class="danger-mini-btn">مسح الجدول</button>
+                    </div>
+                </div>
+
+                <div id="playlist-table-wrap" class="playlist-table-wrap">
+                    <table class="playlist-table">
+                        <thead>
+                            <tr>
+                                <th>#</th>
+                                <th>الاسم</th>
+                                <th>الصيغة</th>
+                                <th>وقت العمل (مجدول)</th>
+                                <th>المصدر</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="playlist-body">
+                            <tr class="empty-row">
+                                <td colspan="5">أضف عناصر من المكتبة لبناء جدول البث.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            </div>
+            </div>
+
+            <!-- نظام الشاشتين (المعاينة والمباشر) -->
+            <div class="panel monitors-panel">
+                <div class="panel-header">
+                    <h3>🖥️ شاشات البث والتحكم</h3>
+                </div>
+                <div class="monitors-container">
+                    <!-- شاشة المباشر (Program) -->
+                    <div class="monitor-box">
+                        <div class="monitor-label" style="color: var(--red);">
+                            <span class="tally-light live" id="tally-live"></span> ● البث المباشر (Program)
+                        </div>
+                        <div class="monitor-screen" id="live-screen-wrap">
+                            <video id="live-player" autoplay muted loop controls></video>
+                        </div>
+                    </div>
+
+                    <!-- شاشة التحضير (Preview) -->
+                    <div class="monitor-box">
+                        <div class="monitor-label" style="color: #4ade80;">
+                            <span class="tally-light preview active" id="tally-preview"></span> شاشة التجهيز والتأثيرات
+                            (Preview)
+                        </div>
+                        <div class="monitor-screen" id="prep-screen-wrap">
+                            <video id="prep-player" autoplay muted loop controls></video>
+                            <!-- Dynamic Layers Container -->
+                            <div id="prep-layers-container"
+                                style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;">
+                                <!-- Layers will be injected here via JS -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- ======================== اليمين: إعدادات البث ======================== -->
+        <aside class="sidebar right-sidebar">
+
+            <!-- إعدادات RTMP -->
+            <div class="panel settings-panel">
+                <div class="panel-header">
+                    <h3>📡 إعدادات البث (جهات متعددة)</h3>
+                </div>
+                <div class="form-grid">
+                    <div id="destinations-container">
+                        <div class="dest-row">
+                            <div class="field">
+                                <label>رابط RTMP / RTMPS</label>
+                                <input type="text" class="dest-url" placeholder="rtmps://live.twitch.tv/app">
+                            </div>
+                            <div class="field">
+                                <label>مفتاح البث</label>
+                                <div class="key-wrap">
+                                    <input type="password" class="dest-key" placeholder="live_xxxxxxxxxxxx">
+                                    <button type="button" class="icon-btn toggle-key-btn">👁</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <button type="button" id="add-dest-btn" class="ghost-btn"
+                        style="margin-bottom: 10px; font-size: 0.9rem;">+ إضافة منصة بث أخرى</button>
+                    <div class="field-row">
+                        <div class="field">
+                            <label>الدقة</label>
+                            <select id="resolution">
+                                <option value="1280x720">720p</option>
+                                <option value="1920x1080">1080p</option>
+                                <option value="854x480">480p</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label>الإطارات/ث</label>
+                            <select id="fps">
+                                <option value="30" selected>30</option>
+                                <option value="60">60</option>
+                                <option value="25">25</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="field">
+                        <label>معدل البت (Kbps)</label>
+                        <select id="bitrate">
+                            <option value="1000">1000 kbps</option>
+                            <option value="2500" selected>2500 kbps</option>
+                            <option value="4000">4000 kbps</option>
+                            <option value="6000">6000 kbps</option>
+                            <option value="8000">8000 kbps</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- نظام الطبقات والجرافيك المتقدم -->
+            <div class="panel layers-panel">
+                <div class="panel-header">
+                    <h3>🎨 الطبقات والجرافيك (Layers)</h3>
+                    <div style="display: flex; gap: 8px;">
+                        <button id="push-to-live-btn" class="solid-btn"
+                            style="padding: 5px 12px; font-size: 0.75rem; width: auto; background: var(--accent2); border: 1px solid var(--accent);">🔄
+                            تحديث البث</button>
+                        <button id="add-text-layer-btn" class="solid-btn"
+                            style="padding: 5px 10px; font-size: 0.8rem; width: auto;">+ نص</button>
+                        <button id="add-image-layer-btn" class="solid-btn"
+                            style="padding: 5px 10px; font-size: 0.8rem; width: auto; background: var(--accent2);">+
+                            صورة</button>
+                    </div>
+                </div>
+
+                <div id="layers-list" class="scrollable-list" style="max-height: 250px;">
+                    <!-- ستظهر الطبقات هنا -->
+                    <div class="empty-state">لا توجد طبقات إضافية. أضف نصاً أو شعاراً.</div>
+                </div>
+
+                <div class="field"
+                    style="display: flex; align-items: center; gap: 10px; margin-top: 15px; border-top: 1px solid var(--border); padding-top: 15px;">
+                    <input type="checkbox" id="record-stream-chk" style="width: 20px; height: 20px;">
+                    <label for="record-stream-chk"
+                        style="margin: 0; cursor: pointer; color: #fff; font-size: 0.85rem;">حفظ نسخة أرشيفية (VOD)
+                        أثناء البث</label>
+                </div>
+            </div>
+
+            <!-- الإعدادات المسبقة -->
+            <div class="panel presets-panel">
+                <div class="panel-header">
+                    <h3>⚡ إعدادات سريعة</h3>
+                </div>
+                <div class="presets-grid">
+                    <button class="preset-btn" data-rtmp="rtmps://live.twitch.tv/app">
+                        <span class="preset-icon">🟣</span> Twitch
+                    </button>
+                    <button class="preset-btn" data-rtmp="rtmp://a.rtmp.youtube.com/live2">
+                        <span class="preset-icon">🔴</span> YouTube
+                    </button>
+                    <button class="preset-btn" data-rtmp="rtmps://live-api-s.facebook.com:443/rtmp">
+                        <span class="preset-icon">🔵</span> Facebook
+                    </button>
+                    <button class="preset-btn" data-rtmp="rtmp://live.restream.io/live">
+                        <span class="preset-icon">🌐</span> Restream
+                    </button>
+                </div>
+            </div>
+
+            <!-- أزرار التحكم -->
+            <div class="panel actions-panel">
+                <button id="go-live-btn" class="go-live-btn">
+                    <span class="btn-icon">📡</span>
+                    <span class="btn-text">ابدأ البث</span>
+                </button>
+                <button id="stop-btn" class="stop-btn hidden">
+                    <span class="btn-icon">⏹</span>
+                    <span class="btn-text">إيقاف البث</span>
+                </button>
+                <p class="stream-note">🔒 البث يستمر حتى بعد إغلاق المتصفح.</p>
+            </div>
+
+        </aside>
+
+    </main>
+
+    <!-- Firebase SDK -->
+    <script type="module" src="studio.js"></script>
+</body>
+
+</html>
